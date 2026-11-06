@@ -1,0 +1,1062 @@
+from datetime import datetime
+from pathlib import Path
+import calendar
+import json
+
+# ==================================================
+# BOARDING HOUSE PAYMENT MONITORING SYSTEM
+# ==================================================
+
+DATA_FILE = Path("boarding_house_data.json")
+
+BILL_CATEGORIES = ["Monthly Rent", "Electricity", "Water"]
+
+DEFAULT_ROOMS = {
+    "R101": {"rent": 2500, "capacity": 1, "occupied": 0},
+    "R102": {"rent": 2500, "capacity": 1, "occupied": 0},
+    "R201": {"rent": 3000, "capacity": 1, "occupied": 0},
+    "R202": {"rent": 3000, "capacity": 1, "occupied": 0}
+}
+
+rooms = {key: value.copy() for key, value in DEFAULT_ROOMS.items()}
+tenants = {}
+bills = {}
+payment_submissions = []
+payment_records = []
+
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "admin123"
+
+GCASH_NAME = "Boarding House Admin"
+GCASH_NUMBER = "0951-538-6038"
+
+# DATE FUNCTIONS
+
+def now():
+    return datetime.now()
+
+def add_one_month(date_value):
+    month = date_value.month + 1
+    year = date_value.year
+    if month > 12:
+        month = 1
+        year += 1
+    last_day = calendar.monthrange(year, month)[1]
+    return date_value.replace(
+        year=year,
+        month=month,
+        day=min(date_value.day, last_day)
+    )
+
+def parse_datetime(value):
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+
+def format_date(value):
+    parsed = parse_datetime(value)
+    return parsed.strftime("%Y-%m-%d") if parsed else "Not set"
+
+def format_datetime(value):
+    parsed = parse_datetime(value)
+    return parsed.strftime("%Y-%m-%d %I:%M %p") if parsed else "Not recorded"
+
+# TABLE FUNCTION
+
+def print_table(headers, rows):
+    if not headers:
+        return
+    rows = [
+        [str(value) if value is not None else "" for value in row]
+        for row in rows
+    ]
+
+    widths = []
+
+    for index, header in enumerate(headers):
+        width = len(str(header))
+        for row in rows:
+            if index < len(row):
+                width = max(width, len(row[index]))
+        widths.append(width)
+    separator = "-+-".join("-" * width for width in widths)
+    print()
+    print(" | ".join(
+        str(header).ljust(widths[index])
+        for index, header in enumerate(headers)
+    ))
+    print(separator)
+    for row in rows:
+        print(" | ".join(
+            row[index].ljust(widths[index])
+            for index in range(len(headers))
+        ))
+    print()
+
+# SAVE AND LOAD DATA
+
+def save_data():
+    data = {
+        "rooms": rooms,
+        "tenants": tenants,
+        "bills": bills,
+        "payment_submissions": payment_submissions,
+        "payment_records": payment_records
+    }
+    try:
+        with DATA_FILE.open("w", encoding="utf-8") as file:
+            json.dump(data, file, indent=4, default=str)
+    except OSError as error:
+        print(f"Error saving data: {error}")
+
+def sync_room_occupancy():
+    for room_number in rooms:
+        rooms[room_number]["occupied"] = 0
+    for tenant in tenants.values():
+        room_number = tenant.get("room")
+        if room_number in rooms:
+            rooms[room_number]["occupied"] += 1
+
+def load_data():
+    global rooms, tenants, bills
+    global payment_submissions, payment_records
+    if not DATA_FILE.exists():
+        return
+    try:
+        with DATA_FILE.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+        loaded_rooms = data.get("rooms", {})
+        for room_number, details in DEFAULT_ROOMS.items():
+            loaded_rooms.setdefault(room_number, details.copy())
+        rooms = loaded_rooms
+        tenants = data.get("tenants", {})
+        bills = data.get("bills", {})
+        payment_submissions = data.get("payment_submissions", [])
+        payment_records = data.get("payment_records", [])
+        if not isinstance(payment_submissions, list):
+            payment_submissions = []
+        if not isinstance(payment_records, list):
+            payment_records = []
+        for username, tenant in tenants.items():
+            bills.setdefault(username, {})
+            room_number = tenant.get("room")
+            rent = rooms.get(room_number, {}).get("rent", 0)
+            bills[username].setdefault("Monthly Rent", {
+                "amount": rent,
+                "paid": 0,
+                "due_date": add_one_month(now()).isoformat(),
+                "updated_at": now().isoformat()
+            })
+            for category in BILL_CATEGORIES:
+                bills[username].setdefault(category, {
+                    "amount": 0,
+                    "paid": 0,
+                    "due_date": None,
+                    "updated_at": None
+                })
+                bills[username][category].setdefault("amount", 0)
+                bills[username][category].setdefault("paid", 0)
+                bills[username][category].setdefault("due_date", None)
+                bills[username][category].setdefault("updated_at", None)
+        for submission in payment_submissions:
+            submission.setdefault("payment_method", "Cash")
+            submission.setdefault("reference_number", "N/A")
+            submission.setdefault("status", "PENDING")
+            submission.setdefault("submitted_at", None)
+            submission.setdefault("verified_at", None)
+            if submission["payment_method"] == "Cash":
+                submission["reference_number"] = "N/A"
+        for record in payment_records:
+            record.setdefault("payment_method", "Cash")
+            record.setdefault("reference_number", "N/A")
+            record.setdefault("paid_at", None)
+            if record["payment_method"] == "Cash":
+                record["reference_number"] = "N/A"
+        sync_room_occupancy()
+        save_data()
+    except (OSError, json.JSONDecodeError, TypeError) as error:
+        print(f"Error loading data: {error}")
+
+# INPUT FUNCTIONS
+
+def get_nonempty_input(prompt):
+    while True:
+        value = input(prompt).strip()
+        if value:
+            return value
+        print("Input cannot be empty.")
+
+def get_numeric_choice(prompt, minimum, maximum):
+    while True:
+        value = input(prompt).strip()
+        if not value.isdigit():
+            print("Please enter a number.")
+            continue
+        choice = int(value)
+        if minimum <= choice <= maximum:
+            return choice
+        print(f"Enter a number from {minimum} to {maximum}.")
+
+def get_amount(prompt, allow_zero=True):
+    while True:
+        try:
+            amount = round(float(input(prompt).strip()), 2)
+            if amount < 0 or (not allow_zero and amount == 0):
+                print("Enter a valid positive amount.")
+                continue
+            return amount
+        except ValueError:
+            print("Invalid amount. Please enter a number.")
+
+
+# VALIDATE DUE DATE
+# PAST DATES ARE NOT ALLOWED
+
+def get_valid_date(prompt):
+    while True:
+        value = input(prompt).strip()
+        try:
+            selected_date = datetime.strptime(
+                value, "%Y-%m-%d"
+            ).date()
+            if selected_date.isoformat() != value:
+                print("Invalid date. Use YYYY-MM-DD format.")
+                continue
+            if selected_date < now().date():
+                print("Invalid date. Due date cannot be in the past.")
+                continue
+            return datetime.combine(
+                selected_date,
+                datetime.min.time()
+            ).isoformat()
+        except ValueError:
+            print("Invalid date. Please use YYYY-MM-DD format.")
+
+
+# ROOM MANAGEMENT
+
+def display_available_rooms():
+    rows = []
+    for room_number, details in rooms.items():
+        available = details["capacity"] - details["occupied"]
+        rows.append([
+            room_number,
+            f"PHP {details['rent']:.2f}",
+            details["capacity"],
+            details["occupied"],
+            max(available, 0),
+            "Available" if available > 0 else "Full"
+        ])
+    print_table(
+        ["Room", "Monthly Rent", "Capacity", "Occupied", "Available", "Status"],
+        rows
+    )
+
+def get_room_by_choice():
+    room_numbers = list(rooms.keys())
+    while True:
+        available_rooms = [
+            room_number for room_number in room_numbers
+            if rooms[room_number]["occupied"] < rooms[room_number]["capacity"]
+        ]
+        if not available_rooms:
+            print("\nAll rooms are full.")
+            print("Returning to the Admin Menu...")
+            return None
+        print("\nAVAILABLE ROOMS")
+        rows = []
+        for index, room_number in enumerate(room_numbers, 1):
+            details = rooms[room_number]
+            available = details["capacity"] - details["occupied"]
+            rows.append([
+                index,
+                room_number,
+                f"PHP {details['rent']:.2f}",
+                max(available, 0),
+                "Available" if available > 0 else "Full"
+            ])
+        print_table(
+            ["Choice", "Room Number", "Monthly Rent",
+             "Slots Available", "Status"],
+            rows
+        )
+        choice = get_numeric_choice(
+            "Enter room choice number (0 to return to menu): ",
+            0,
+            len(room_numbers)
+        )
+        if choice == 0:
+            print("Returning to the Admin Menu...")
+            return None
+        room_number = room_numbers[choice - 1]
+        if rooms[room_number]["occupied"] < rooms[room_number]["capacity"]:
+            return room_number
+        print("That room is full. Choose another room.")
+
+# CREATE TENANT ACCOUNT
+
+def create_tenant():
+    print("\n========== CREATE TENANT ACCOUNT ==========")
+    if all(
+        details["occupied"] >= details["capacity"]
+        for details in rooms.values()
+    ):
+        print("\nAll rooms are full.")
+        print("Returning to the Admin Menu...")
+        return
+    username = get_nonempty_input("Create username: ")
+    if username.lower() == ADMIN_USERNAME.lower():
+        print("This username is reserved.")
+        return
+    if username in tenants:
+        print("Username already exists.")
+        return
+    password = get_nonempty_input("Create password: ")
+    full_name = get_nonempty_input("Tenant full name: ")
+    contact = get_nonempty_input("Contact number: ")
+    room_number = get_room_by_choice()
+    if room_number is None:
+        return
+    tenants[username] = {
+        "username": username,
+        "password": password,
+        "full_name": full_name,
+        "contact": contact,
+        "room": room_number,
+        "created_at": now().isoformat()
+    }
+    rooms[room_number]["occupied"] += 1
+    rent = rooms[room_number]["rent"]
+    due_date = add_one_month(now()).isoformat()
+    bills[username] = {
+        "Monthly Rent": {
+            "amount": rent,
+            "paid": 0,
+            "due_date": due_date,
+            "updated_at": now().isoformat()
+        },
+        "Electricity": {
+            "amount": 0,
+            "paid": 0,
+            "due_date": None,
+            "updated_at": None
+        },
+        "Water": {
+            "amount": 0,
+            "paid": 0,
+            "due_date": None,
+            "updated_at": None
+        }
+    }
+    save_data()
+    print("\nTenant account created successfully.")
+    print(f"Username: {username}")
+    print(f"Full Name: {full_name}")
+    print(f"Room: {room_number}")
+    print(f"Monthly Rent: PHP {rent:.2f}")
+    print(f"Rent Due Date: {format_date(due_date)}")
+
+# VIEW TENANT ACCOUNTS
+
+def view_tenant_accounts():
+    print("\n========== TENANT ACCOUNTS ==========")
+    if not tenants:
+        print("No tenant accounts found.")
+        return
+    rows = []
+    for username, tenant in tenants.items():
+        rows.append([
+            username,
+            tenant.get("full_name", ""),
+            tenant.get("contact", ""),
+            tenant.get("room", ""),
+            format_datetime(tenant.get("created_at"))
+        ])
+    print_table(["Username", "Full Name", "Contact", "Room", "Account Created"], rows)
+# DELETE TENANT ACCOUNT
+
+def delete_tenant_account():
+    print("\n========== DELETE TENANT ACCOUNT ==========")
+    if not tenants:
+        print("No tenant accounts found.")
+        return
+    view_tenant_accounts()
+    username = input("Enter tenant username to delete: ").strip()
+    if username not in tenants:
+        print("Tenant account not found.")
+        return
+
+    tenant = tenants[username]
+    print("\n========== SELECTED TENANT ACCOUNT ==========")
+    print(f"Username   : {username}")
+    print(f"Full Name  : {tenant.get('full_name', '')}")
+    print(f"Contact    : {tenant.get('contact', '')}")
+    print(f"Room Number: {tenant.get('room', '')}")
+    confirm = input("\nAre you sure you want to delete this account? (YES/NO): ").strip().upper()
+    if confirm != "YES":
+        print("Account deletion cancelled.")
+        return
+    del tenants[username]
+    bills.pop(username, None)
+    payment_submissions[:] = [
+        payment for payment in payment_submissions
+        if payment.get("username") != username
+    ]
+    sync_room_occupancy()
+    save_data()
+    print("\nTenant account deleted successfully!")
+    print("The tenant account and associated bills have been removed.")
+    print("Verified payment history has been preserved.")
+
+# BILL FUNCTIONS
+
+def get_balance(bill):
+    return max(
+        round(
+            float(bill.get("amount", 0))
+            - float(bill.get("paid", 0)),
+            2
+        ),
+        0
+    )
+
+def get_status(bill):
+    amount = float(bill.get("amount", 0))
+    paid = float(bill.get("paid", 0))
+    balance = get_balance(bill)
+    if amount <= 0:
+        return "NO BILL"
+    if balance <= 0:
+        return "PAID"
+    due_date = parse_datetime(bill.get("due_date"))
+    if due_date and now().date() > due_date.date():
+        return "OVERDUE"
+    if paid > 0:
+        return "PARTIAL"
+    return "UNPAID"
+
+def get_tenant_balance(username):
+    return round(
+        sum(
+            get_balance(bill)
+            for bill in bills.get(username, {}).values()
+        ),
+        2
+    )
+
+def display_payment_table(username):
+    rows = []
+    for category in BILL_CATEGORIES:
+        bill = bills.get(username, {}).get(category)
+        if bill:
+            rows.append([
+                category,
+                f"PHP {float(bill.get('amount', 0)):.2f}",
+                f"PHP {float(bill.get('paid', 0)):.2f}",
+                f"PHP {get_balance(bill):.2f}",
+                format_date(bill.get("due_date")),
+                get_status(bill)
+            ])
+    print_table(["Bill Category", "Amount", "Paid", "Balance", "Due Date", "Status"], rows)
+    print(f"TOTAL BALANCE: PHP {get_tenant_balance(username):.2f}")
+
+
+# GENERATE OR UPDATE BILL
+
+def generate_bill():
+    print("\n========== GENERATE / UPDATE BILL ==========")
+    if not tenants:
+        print("No tenant accounts found.")
+        return
+    view_tenant_accounts()
+    username = input("Enter tenant username: ").strip()
+    if username not in tenants:
+        print("Tenant account not found.")
+        return
+    print("\nBILL CATEGORIES")
+    for index, category in enumerate(BILL_CATEGORIES, 1):
+        print(f"{index}. {category}")
+
+    choice = get_numeric_choice(
+        "Choose bill category: ",
+        1,
+        len(BILL_CATEGORIES)
+    )
+    category = BILL_CATEGORIES[choice - 1]
+    old_bill = bills[username].get(category, {
+        "amount": 0,
+        "paid": 0,
+        "due_date": None,
+        "updated_at": None
+    })
+    print(f"Previously Paid: PHP {float(old_bill.get('paid', 0)):.2f}")
+    amount = get_amount("Enter total bill amount (PHP): ")
+    if amount < float(old_bill.get("paid", 0)):
+        print("Amount cannot be less than the amount already paid.")
+        return
+    due_date = get_valid_date("Enter due date (YYYY-MM-DD): ")
+    bills[username][category] = {
+        "amount": amount,
+        "paid": float(old_bill.get("paid", 0)),
+        "due_date": due_date,
+        "updated_at": now().isoformat()
+    }
+    save_data()
+    print("Bill generated or updated successfully.")
+    print(f"Category: {category}")
+    print(f"Amount: PHP {amount:.2f}")
+    print(f"Due Date: {format_date(due_date)}")
+
+# VIEW ALL PAYMENT BILLS
+
+def view_all_payment_bills():
+    print("\n========== ALL PAYMENT BILLS ==========")
+    rows = []
+    for username, tenant in tenants.items():
+        for category in BILL_CATEGORIES:
+            bill = bills.get(username, {}).get(category)
+            if bill:
+                rows.append([
+                    username,
+                    tenant.get("full_name", ""),
+                    tenant.get("room", ""),
+                    category,
+                    f"PHP {float(bill.get('amount', 0)):.2f}",
+                    f"PHP {float(bill.get('paid', 0)):.2f}",
+                    f"PHP {get_balance(bill):.2f}",
+                    format_date(bill.get("due_date")),
+                    get_status(bill)
+                ])
+    if not rows:
+        print("No payment bills found.")
+        return
+    print_table(
+        ["Username", "Tenant", "Room", "Category", "Amount",
+         "Paid", "Balance", "Due Date", "Status"],
+        rows
+    )
+
+
+
+# GCASH DETAILS
+
+def view_gcash_info():
+    print("\n========== GCASH DETAILS ==========")
+    print(f"Account Name: {GCASH_NAME}")
+    print(f"GCash Number: {GCASH_NUMBER}")
+
+# PAYMENT SUBMISSION
+
+
+# PAYMENT SUBMISSION
+
+def get_next_submission_id():
+    ids = []
+    for submission in payment_submissions:
+        try:
+            ids.append(int(submission.get("submission_id", 0)))
+        except (ValueError, TypeError):
+            pass
+    return max(ids, default=0) + 1
+
+
+def reference_exists(reference):
+    # Check submitted payments that have not been rejected.
+    for submission in payment_submissions:
+        if (
+            submission.get("payment_method") == "GCash"
+            and submission.get("reference_number") == reference
+            and submission.get("status") != "REJECTED"
+        ):
+            return True
+
+    # Also check verified payment records.
+    for record in payment_records:
+        if (
+            record.get("payment_method") == "GCash"
+            and record.get("reference_number") == reference
+        ):
+            return True
+
+    return False
+
+
+def has_pending_payment(username, category):
+    """Return True if this tenant already has a pending payment
+    for the selected bill category."""
+    return any(
+        payment.get("username") == username
+        and payment.get("bill_category") == category
+        and payment.get("status") == "PENDING"
+        for payment in payment_submissions
+    )
+
+
+def get_pending_payment_amount(username, category):
+    """Calculate the amount already awaiting admin verification."""
+    return round(
+        sum(
+            float(payment.get("amount", 0))
+            for payment in payment_submissions
+            if payment.get("username") == username
+            and payment.get("bill_category") == category
+            and payment.get("status") == "PENDING"
+        ),
+        2
+    )
+
+
+def submit_payment(username):
+    print("\n========== SUBMIT PAYMENT ==========")
+
+    display_payment_table(username)
+
+    tenant_bills = bills.get(username, {})
+
+    if get_tenant_balance(username) <= 0:
+        print("You have no outstanding balance.")
+        return
+
+    # Only display bills that have an outstanding amount
+    # and do not already have a pending payment submission.
+    available_bills = []
+
+    for category in BILL_CATEGORIES:
+        bill = tenant_bills.get(category)
+
+        if not bill:
+            continue
+
+        balance = get_balance(bill)
+
+        if balance <= 0:
+            continue
+
+        if has_pending_payment(username, category):
+            print(
+                f"\n{category}: You have already submitted "
+                "a payment for this bill."
+            )
+            print(
+                "Please wait for admin verification before "
+                "submitting another payment."
+            )
+            continue
+
+        # Reserve amounts from other pending submissions
+        # to avoid allowing payments beyond the remaining balance.
+        pending_amount = get_pending_payment_amount(
+            username, category
+        )
+        remaining = round(balance - pending_amount, 2)
+
+        if remaining > 0:
+            available_bills.append(category)
+
+    if not available_bills:
+        print("\nNo bills are currently available for payment.")
+        print(
+            "Please wait for pending payments to be verified "
+            "or check your outstanding bills."
+        )
+        return
+
+    print("\nSELECT BILL")
+
+    for index, category in enumerate(available_bills, 1):
+        bill = tenant_bills[category]
+        balance = get_balance(bill)
+
+        print(
+            f"{index}. {category} - "
+            f"PHP {balance:.2f}"
+        )
+
+    choice = get_numeric_choice(
+        "Choose bill number: ",
+        1,
+        len(available_bills)
+    )
+
+    category = available_bills[choice - 1]
+
+    # Check again before proceeding.
+    if has_pending_payment(username, category):
+        print(
+            "You have already submitted a payment for this bill. "
+            "Please wait for admin verification."
+        )
+        return
+
+    bill = tenant_bills[category]
+    balance = get_balance(bill)
+
+    amount = get_amount(
+        "Enter payment amount (PHP): ",
+        allow_zero=False
+    )
+
+    if amount > balance:
+        print("Payment cannot exceed the outstanding balance.")
+        return
+
+    print("\nPAYMENT METHOD")
+    print("1. Cash")
+    print("2. GCash")
+
+    method_choice = get_numeric_choice(
+        "Choose method: ", 1, 2
+    )
+
+    if method_choice == 1:
+        method = "Cash"
+        reference = "N/A"
+
+    else:
+        method = "GCash"
+        view_gcash_info()
+
+        while True:
+            reference = input(
+                "Enter GCash reference number (numbers only): "
+            ).strip()
+
+            if not reference.isdigit():
+                print(
+                    "Invalid reference number. "
+                    "Enter numbers only."
+                )
+                continue
+
+            if reference_exists(reference):
+                print(
+                    "Reference number already used. "
+                    "Please enter a different reference number."
+                )
+                continue
+
+            break
+
+    # Final duplicate check before saving.
+    if has_pending_payment(username, category):
+        print(
+            "You have already submitted a payment for this bill. "
+            "Please wait for admin verification."
+        )
+        return
+
+    # Recheck the bill balance before creating the submission.
+    current_balance = get_balance(
+        bills.get(username, {}).get(category, {})
+    )
+
+    if amount > current_balance:
+        print(
+            "Payment cannot exceed the current outstanding balance."
+        )
+        return
+
+    submission = {
+        "submission_id": get_next_submission_id(),
+        "username": username,
+        "full_name": tenants[username].get("full_name", ""),
+        "room": tenants[username].get("room", ""),
+        "bill_category": category,
+        "amount": amount,
+        "payment_method": method,
+        "reference_number": reference,
+        "status": "PENDING",
+        "submitted_at": now().isoformat(),
+        "verified_at": None
+    }
+
+    payment_submissions.append(submission)
+    save_data()
+
+    print("\nPayment submitted successfully.")
+    print(f"Submission ID: {submission['submission_id']}")
+    print(f"Bill Category: {category}")
+    print(f"Amount: PHP {amount:.2f}")
+    print(f"Payment Method: {method}")
+    print("Status: PENDING")
+    print(
+        "Please wait for the admin to verify your payment."
+    )
+
+
+# ADMIN: VIEW PAYMENT SUBMISSIONS
+
+def view_payment_submissions():
+    print("\n========== PAYMENT SUBMISSIONS ==========")
+    if not payment_submissions:
+        print("No payment submissions found.")
+        return
+    rows = []
+    for payment in payment_submissions:
+        rows.append([
+            payment.get("submission_id", ""),
+            payment.get("username", ""),
+            payment.get("full_name", ""),
+            payment.get("bill_category", ""),
+            f"PHP {float(payment.get('amount', 0)):.2f}",
+            payment.get("payment_method", ""),
+            payment.get("reference_number", "N/A"),
+            payment.get("status", ""),
+            format_datetime(payment.get("submitted_at"))
+        ])
+
+    print_table(["ID", "Username", "Tenant", "Bill", "Amount", "Method", "Reference", "Status", "Submitted At"],  rows)
+
+# ADMIN: VERIFY PAYMENT
+
+def verify_payment():
+    print("\n========== VERIFY PAYMENT ==========")
+
+    pending = [
+        payment for payment in payment_submissions
+        if payment.get("status") == "PENDING"
+    ]
+
+    if not pending:
+        print("No pending payments.")
+        return
+
+    print_table(
+        ["ID", "Username", "Bill", "Amount", "Method", "Reference"],
+        [
+            [
+                payment.get("submission_id", ""),
+                payment.get("username", ""),
+                payment.get("bill_category", ""),
+                f"PHP {float(payment.get('amount', 0)):.2f}",
+                payment.get("payment_method", ""),
+                payment.get("reference_number", "N/A")
+            ]
+            for payment in pending
+        ]
+    )
+
+    submission_id = get_numeric_choice(
+        "Enter submission ID: ",
+        1,
+        max(int(p["submission_id"]) for p in pending)
+    )
+    selected = next(
+        (
+            payment for payment in pending
+            if int(payment["submission_id"]) == submission_id
+        ),
+        None
+    )
+    if selected is None:
+        print("Pending payment not found.")
+        return
+
+    print("1. Approve")
+    print("2. Reject")
+    print("3. Cancel")
+
+    action = get_numeric_choice("Choose action: ", 1, 3)
+
+    if action == 3:
+        print("Cancelled.")
+        return
+
+    if action == 2:
+        selected["status"] = "REJECTED"
+        selected["verified_at"] = now().isoformat()
+        save_data()
+        print("Payment rejected.")
+        return
+
+    username = selected.get("username")
+    category = selected.get("bill_category")
+    if username not in tenants:
+        print("Tenant account no longer exists.")
+        return
+    bill = bills.get(username, {}).get(category)
+    if not bill:
+        print("Bill not found.")
+        return
+    amount = float(selected.get("amount", 0))
+    if amount <= 0 or amount > get_balance(bill):
+        print("Cannot approve: payment exceeds the current balance.")
+        return
+    bill["paid"] = round(float(bill.get("paid", 0)) + amount, 2)
+    bill["updated_at"] = now().isoformat()
+    selected["status"] = "APPROVED"
+    selected["verified_at"] = now().isoformat()
+    payment_records.append({
+        "submission_id": selected.get("submission_id"),
+        "username": username,
+        "full_name": tenants[username].get("full_name", ""),
+        "room": tenants[username].get("room", ""),
+        "bill_category": category,
+        "amount": amount,
+        "payment_method": selected.get("payment_method", "Cash"),
+        "reference_number": selected.get("reference_number", "N/A"),
+        "paid_at": now().isoformat(),
+        "status": "APPROVED"
+    })
+
+    save_data()
+    print("Payment approved successfully.")
+
+# TENANT: PAYMENT HISTORY
+
+def tenant_payment_history(username):
+    print("\n========== MY PAYMENT HISTORY ==========")
+    records = [ record for record in payment_records if record.get("username") == username]
+    if not records:
+        print("No verified payment records found.")
+        return
+    rows = []
+    for record in records:
+        rows.append([
+            record.get("submission_id", ""),
+            record.get("bill_category", ""),
+            f"PHP {float(record.get('amount', 0)):.2f}",
+            record.get("payment_method", ""),
+            record.get("reference_number", "N/A"),
+            format_datetime(record.get("paid_at")),
+            record.get("status", "APPROVED")
+        ])
+
+    print_table(["Payment ID", "Bill", "Amount", "Method", "Reference", "Paid At", "Status"], rows)
+
+# ADMIN MENU
+
+def admin_menu():
+    while True:
+        print("\n========== ADMIN MENU ==========")
+        print("1. View Available Rooms")
+        print("2. Create Tenant Account")
+        print("3. View Tenant Accounts")
+        print("4. Generate / Update Bill")
+        print("5. View All Payment Bills")
+        print("6. View Payment Submissions")
+        print("7. Verify Payment")
+        print("8. View GCash Details")
+        print("9. Delete Tenant Account")
+        print("10. Logout")
+
+        choice = input("Enter choice: ").strip()
+
+        if choice == "1":
+            display_available_rooms()
+        elif choice == "2":
+            create_tenant()
+        elif choice == "3":
+            view_tenant_accounts()
+        elif choice == "4":
+            generate_bill()
+        elif choice == "5":
+            view_all_payment_bills()
+        elif choice == "6":
+            view_payment_submissions()
+        elif choice == "7":
+            verify_payment()
+        elif choice == "8":
+            view_gcash_info()
+        elif choice == "9":
+            delete_tenant_account()
+        elif choice == "10":
+            save_data()
+            print("Admin logged out.")
+            break
+        else:
+            print("Invalid choice.")
+
+# TENANT MENU
+
+def tenant_menu(username):
+    while username in tenants:
+        tenant = tenants[username]
+
+        print("\n========== TENANT MENU ==========")
+        print(f"Welcome, {tenant.get('full_name', username)}")
+        print(f"Room Number: {tenant.get('room', '')}")
+        print("1. View My Payment Bills")
+        print("2. View GCash Details")
+        print("3. Submit Payment")
+        print("4. View My Payment History")
+        print("5. Logout")
+
+        choice = input("Enter choice: ").strip()
+
+        if choice == "1":
+            display_payment_table(username)
+        elif choice == "2":
+            view_gcash_info()
+        elif choice == "3":
+            submit_payment(username)
+        elif choice == "4":
+            tenant_payment_history(username)
+        elif choice == "5":
+            save_data()
+            print("Tenant logged out.")
+            break
+        else:
+            print("Invalid choice.")
+
+
+# ==================================================
+# LOGIN
+# ==================================================
+
+def login():
+    print("\n========== LOGIN MENU ==========")
+    print("1. Admin Login")
+    print("2. Tenant Login")
+    print("3. Exit")
+
+    choice = input("Choose option: ").strip()
+    if choice == "1":
+        username = input("Admin username: ").strip()
+        password = input("Admin password: ").strip()
+
+        if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+            print("Admin login successful.")
+            admin_menu()
+        else:
+            print("Invalid admin username or password.")
+
+    elif choice == "2":
+        username = input("Tenant username: ").strip()
+        password = input("Tenant password: ").strip()
+        if (username in tenants and tenants[username].get("password") == password):
+            print("Tenant login successful.")
+            tenant_menu(username)
+        else:
+            print("Invalid tenant username or password.")
+    elif choice == "3":
+        return False
+    else:
+        print("Invalid choice.")
+    return True
+
+# MAIN PROGRAM
+def main():
+    load_data()
+    print("==============================================")
+    print("   BOARDING HOUSE PAYMENT MONITORING SYSTEM")
+    print("==============================================")
+    while True:
+        try:
+            if not login():
+                break
+        except (KeyboardInterrupt, EOFError):
+            print("\nProgram closed.")
+            break
+        finally:
+            save_data()
+
+    print("Thank you for using the system.")
+
+if _name_ == "_main_":
+    main()
